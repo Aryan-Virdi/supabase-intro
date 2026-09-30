@@ -12,17 +12,16 @@ app.use(express.json());
 app.use(cookieParser());
 app.use(express.static('public'));
 
-// The browser sends PBKDF2(password, salt=username). That value is now the "password",
-// so we hash it again with a random per-user salt before storing it.
 const scrypt = (pw, salt) => new Promise((res, rej) =>
-  crypto.scrypt(pw, salt, 64, (e, k) => (e ? rej(e) : res(k))));
-const hashStored = async (clientHash) => {
+  crypto.scrypt(pw, salt, 64, { N: 2 ** 17, r: 8, p: 1, maxmem: 256 * 1024 * 1024 },
+    (e, k) => (e ? rej(e) : res(k))));
+const hashStored = async (pw) => {
   const salt = crypto.randomBytes(16);
-  return salt.toString('hex') + ':' + (await scrypt(clientHash, salt)).toString('hex');
+  return salt.toString('hex') + ':' + (await scrypt(pw, salt)).toString('hex');
 };
-const verifyStored = async (clientHash, stored) => {
+const verifyStored = async (pw, stored) => {
   const [s, h] = stored.split(':');
-  const a = await scrypt(clientHash, Buffer.from(s, 'hex'));
+  const a = await scrypt(pw, Buffer.from(s, 'hex'));
   return crypto.timingSafeEqual(a, Buffer.from(h, 'hex'));
 };
 
@@ -31,32 +30,42 @@ const setSession = (res, u) =>
     { httpOnly: true, sameSite: 'strict', secure: process.env.NODE_ENV === 'production' });
 
 app.post('/api/register', async (req, res) => {
-  const { username, name, clientHash } = req.body || {};
-  if (!/^[a-z0-9_]{3,32}$/.test(username || '') || !name || !/^[0-9a-f]{64}$/.test(clientHash || ''))
-    return res.status(400).json({ error: 'Invalid username, name, or password hash.' });
+  const { username, name, password } = req.body || {};
+  if (!/^[a-z0-9_]{3,32}$/.test(username || '') || !name ||
+      typeof password !== 'string' || password.length < 12 || password.length > 128)
+    return res.status(400).json({ error: 'Username must be 3-32 characters (a-z, 0-9, _). Password must be 12-128 characters.' });
   try {
     const { rows } = await pool.query(
       `INSERT INTO users (username, name, hashed_password, role_id)
        VALUES ($1, $2, $3, (SELECT id FROM roles WHERE role_name = 'operator'))
        RETURNING id, name, 'operator' AS role_name`,
-      [username, name, await hashStored(clientHash)]);
+      [username, name, await hashStored(password)]);
     setSession(res, rows[0]);
     res.json({ ok: true });
   } catch (e) {
-    res.status(e.code === '23505' ? 409 : 500).json({ error: e.code === '23505' ? 'Username already taken.' : 'Server error.' });
+    if (e.code === '23505') return res.status(409).json({ error: 'Username already taken.' });
+    console.error(e);
+    res.status(500).json({ error: 'Server error.' });
   }
 });
 
 app.post('/api/login', async (req, res) => {
-  const { username, clientHash } = req.body || {};
-  const { rows } = await pool.query(
-    `SELECT u.id, u.name, u.hashed_password, r.role_name
-     FROM users u JOIN roles r ON r.id = u.role_id WHERE u.username = $1`, [username || '']);
-  // Same error for unknown user and bad password.
-  if (!rows[0] || !(await verifyStored(clientHash || '', rows[0].hashed_password)))
-    return res.status(401).json({ error: 'Wrong username or password.' });
-  setSession(res, rows[0]);
-  res.json({ ok: true });
+  try {
+    const { username, password } = req.body || {};
+    if (typeof password !== 'string' || password.length > 128)
+      return res.status(401).json({ error: 'Wrong username or password.' });
+    const { rows } = await pool.query(
+      `SELECT u.id, u.name, u.hashed_password, r.role_name
+       FROM users u JOIN roles r ON r.id = u.role_id WHERE u.username = $1`, [username || '']);
+    // Same error for unknown user and bad password.
+    if (!rows[0] || !(await verifyStored(password, rows[0].hashed_password)))
+      return res.status(401).json({ error: 'Wrong username or password.' });
+    setSession(res, rows[0]);
+    res.json({ ok: true });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: 'Server error.' });
+  }
 });
 
 app.post('/api/logout', (req, res) => res.clearCookie('session').json({ ok: true }));
