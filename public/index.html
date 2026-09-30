@@ -1,0 +1,144 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Field Ops</title>
+<link href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@600;700&family=Barlow:wght@400;500&display=swap" rel="stylesheet">
+<style>
+:root{--green:#367c2b;--deep:#244f1d;--yellow:#ffde00;--ink:#1c2620;--paper:#f3f4f0;--line:#d5d9cf}
+*{box-sizing:border-box}
+body{margin:0;font:16px/1.5 Barlow,Arial,sans-serif;color:var(--ink);background:var(--paper)}
+h1,h2,.brand,.num{font-family:"Barlow Condensed","Arial Narrow",sans-serif;font-weight:700;letter-spacing:.01em}
+header{background:var(--green);border-bottom:6px solid var(--yellow);color:#fff;display:flex;align-items:center;justify-content:space-between;padding:14px 24px}
+.brand{font-size:26px}
+header button{background:transparent;color:#fff;border:2px solid #fff;padding:6px 14px;font:inherit;cursor:pointer}
+main{max-width:960px;margin:0 auto;padding:32px 24px}
+.hide{display:none}
+#login{max-width:400px;margin:56px auto;background:#fff;border-top:6px solid var(--green);padding:28px;box-shadow:0 1px 0 var(--line)}
+#login h1{margin:0 0 4px;font-size:34px}
+label{display:block;margin:16px 0 4px;font-weight:500}
+input{width:100%;padding:10px;border:1px solid #9aa294;font:inherit;background:#fff}
+input:focus,button:focus-visible{outline:3px solid var(--yellow);outline-offset:1px}
+.primary{width:100%;margin-top:22px;padding:12px;background:var(--yellow);color:#111;border:0;font:700 20px "Barlow Condensed",sans-serif;cursor:pointer}
+.primary:hover{background:#f0d000}
+.link{background:none;border:0;color:var(--green);text-decoration:underline;cursor:pointer;font:inherit;padding:0;margin-top:14px}
+#err{color:#a11;min-height:24px;margin-top:12px}
+.role{display:inline-block;background:var(--yellow);color:#111;padding:2px 10px;font-weight:500}
+.stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:16px;margin:24px 0}
+.stat{background:#fff;border-left:6px solid var(--green);padding:16px}
+.stat .num{font-size:48px;line-height:1;color:var(--deep)}
+table{width:100%;border-collapse:collapse;background:#fff}
+th,td{text-align:left;padding:12px 14px;border-bottom:1px solid var(--line)}
+th{background:var(--deep);color:#fff;font-weight:500}
+.tblwrap{overflow-x:auto}
+@media(prefers-reduced-motion:no-preference){.stat{transition:transform .15s}.stat:hover{transform:translateY(-2px)}}
+</style>
+</head>
+<body>
+<header><span class="brand">Field Ops</span><button id="out" class="hide">Sign out</button></header>
+<main>
+  <section id="login">
+    <h1 id="ttl">Sign in</h1>
+    <form id="f">
+      <div id="nameRow" class="hide"><label for="name">Full name</label><input id="name" autocomplete="name"></div>
+      <label for="u">Username</label><input id="u" autocomplete="username" required>
+      <label for="p">Password</label><input id="p" type="password" autocomplete="current-password" required>
+      <button class="primary" id="go">Sign in</button>
+    </form>
+    <div id="err" role="alert"></div>
+    <button class="link" id="swap">Create an account</button>
+  </section>
+
+  <section id="dash" class="hide">
+    <span class="role" id="role"></span>
+    <h2 id="dt" style="font-size:36px;margin:8px 0 0"></h2>
+    <p id="who"></p>
+    <div class="stats" id="stats"></div>
+    <div class="tblwrap"><table><thead id="th"></thead><tbody id="tb"></tbody></table></div>
+  </section>
+</main>
+<script>
+const $ = (id) => document.getElementById(id);
+let registering = false;
+
+// Browser-side hash: PBKDF2-SHA256, username as salt, 100k rounds -> 64 hex chars.
+async function clientHash(pw, username) {
+  const enc = new TextEncoder();
+  const key = await crypto.subtle.importKey('raw', enc.encode(pw), 'PBKDF2', false, ['deriveBits']);
+  const bits = await crypto.subtle.deriveBits(
+    { name: 'PBKDF2', hash: 'SHA-256', salt: enc.encode(username.toLowerCase()), iterations: 100000 }, key, 256);
+  return [...new Uint8Array(bits)].map((b) => b.toString(16).padStart(2, '0')).join('');
+}
+
+$('swap').onclick = () => {
+  registering = !registering;
+  $('nameRow').classList.toggle('hide', !registering);
+  $('ttl').textContent = $('go').textContent = registering ? 'Create account' : 'Sign in';
+  $('swap').textContent = registering ? 'Back to sign in' : 'Create an account';
+  $('err').textContent = '';
+};
+
+$('f').onsubmit = async (e) => {
+  e.preventDefault();
+  const username = $('u').value.trim().toLowerCase();
+  const body = { username, name: $('name').value.trim(), clientHash: await clientHash($('p').value, username) };
+  const r = await fetch(registering ? '/api/register' : '/api/login', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+  if (!r.ok) { $('err').textContent = (await r.json()).error; return; }
+  $('p').value = '';
+  showDash();
+};
+
+async function showDash() {
+  const r = await fetch('/api/dashboard');
+  if (!r.ok) return;
+  const d = await r.json();
+  $('login').classList.add('hide'); $('dash').classList.remove('hide'); $('out').classList.remove('hide');
+  $('role').textContent = d.user.role;
+  $('dt').textContent = d.title;
+  $('who').textContent = 'Signed in as ' + d.user.name;
+  $('stats').innerHTML = '';
+  d.stats.forEach(([label, val]) => {
+    const s = document.createElement('div'); s.className = 'stat';
+    s.innerHTML = '<div class="num"></div><div></div>';
+    s.firstChild.textContent = val; s.lastChild.textContent = label;
+    $('stats').append(s);
+  });
+  const heads = d.user.role === 'admin' ? ['Username', 'Name', 'Role'] : d.user.role === 'agronomist' ? ['Field', 'Reading', 'Action'] : ['Machine', 'Location', 'Status'];
+  $('th').innerHTML = '<tr>' + heads.map(() => '<th></th>').join('') + '</tr>';
+  $('th').querySelectorAll('th').forEach((th, i) => (th.textContent = heads[i]));
+  $('tb').innerHTML = '';
+  d.rows.forEach((row, i) => {
+    const tr = document.createElement('tr');
+    row.forEach((c, j) => {
+      const td = document.createElement('td');
+      if (d.users && j === 2) {                       // admin table, Role column
+        const u = d.users[i];
+        if (String(u.id) === String(d.user.id)) {
+          td.textContent = c + ' (you)';
+        } else {
+          const sel = document.createElement('select');
+          sel.setAttribute('aria-label', 'Role for ' + u.username);
+          d.roles.forEach((r) => sel.add(new Option(r, r, false, r === c)));
+          sel.onchange = async () => {
+            const res = await fetch('/api/users/' + u.id + '/role', {
+              method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ role: sel.value }) });
+            if (!res.ok) alert((await res.json()).error);
+            showDash();
+          };
+          td.append(sel);
+        }
+      } else td.textContent = c;
+      tr.append(td);
+    });
+    $('tb').append(tr);
+  });
+}
+
+$('out').onclick = async () => { await fetch('/api/logout', { method: 'POST' }); location.reload(); };
+showDash();
+</script>
+</body>
+</html>
